@@ -282,9 +282,11 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries = 3) { // �
       // 设置超时时间
       await page.setDefaultNavigationTimeout(60000);
       await page.setDefaultTimeout(60000);
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      // 修改页面加载等待策略
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
       // 等待推文容器渲染
-      await page.waitForSelector('article', { timeout: 30000 });
+      // 额外等待确保页面完全渲染
+      await page.waitForTimeout(2000);
       // 等待推文内所有图片加载完成
       await page.evaluate(async () => {
         const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector('article');
@@ -301,13 +303,25 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries = 3) { // �
       const isProtected = await page.evaluate(() => {
         return !!document.querySelector('[aria-label="受保护账号"]');
       });
-
+      
+      // 改进截图逻辑
       // 定位到推文容器进行截图
       const element = await page.waitForSelector('article[data-testid="tweet"]', { timeout: 15000 });
       if (!element) {
-        throw new Error('未能找到推文容器');
+          throw new Error('未能找到推文容器');
       }
-      const screenshotBuffer = await element.screenshot({ type: "webp" });
+      
+      // 滚动到元素位置，确保完全可见
+      await element.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+      
+      // 等待滚动完成和渲染
+      await page.waitForTimeout(1000);
+      
+      // 截图时包含视口外的内容
+      const screenshotBuffer = await element.screenshot({ 
+          type: "webp",
+          captureBeyondViewport: true 
+      });
 
       if (isProtected) {
         // 受保护账号：只获取文字和截图，不返回媒体
