@@ -43,7 +43,7 @@ export const usage = `
 <hr>
 <div class="version">
 <h3>Version</h3>
-<p>1.1.5</p>
+<p>1.1.6</p>
 <ul>
 <li>修复了视频推文会固定发送至开发时使用的测试群聊的问题😅</li>
 <li>增加了api翻译自定义prompt功能，现在可以自定义你的翻译偏好</li>
@@ -154,6 +154,7 @@ export async function apply(ctx: Context, config, session) {
           // 判断x链接并获取内容
           await session.send("正在获取帖子截图...");
           logger.info('开始请求的推文连接：', url);
+          const tpTweet = await getTimePushedTweet(ctx, ctx.puppeteer, url, config);
           // 根据config决定是否翻译推文
           let tweetWord;
           if (config.whe_translate === true && config.apiKey) {
@@ -167,7 +168,7 @@ export async function apply(ctx: Context, config, session) {
           // 根据是否为视频推文构造不同的消息结构
           if (isVideo) {
             // 视频推文：先发送文字+截图
-            let textMsg = `发布了一条视频推文：\n${tpTweet.word_content}\n`;
+            let textMsg = `发布了一条视频推文：\n${tweetWord}\n`;
             textMsg += `${h.image(tpTweet.screenshotBuffer, "image/webp")}`;
             // 只收集图片
             const imageUrls = tpTweet.mediaUrls.filter(url => !url.endsWith('.mp4'));
@@ -232,7 +233,7 @@ export async function apply(ctx: Context, config, session) {
             }
           } else {
               // 图片推文
-              let msg = `发布了一条图片推文：\n${tpTweet.word_content}\n`;
+              let msg = `发布了一条图片推文：\n${tweetWord}\n`;
               msg += `${h.image(tpTweet.screenshotBuffer, "image/webp")}\n`;
               if (tpTweet.mediaUrls && tpTweet.mediaUrls.length > 0) {
                   const imagePromises = tpTweet.mediaUrls.map(async (imageUrl) => {
@@ -270,105 +271,161 @@ export async function apply(ctx: Context, config, session) {
     });
 }
 
-async function getTimePushedTweet(ctx, pptr, url, config, maxRetries = 3) { // 获取需要推送的推文具体内容
+async function getTimePushedTweet(ctx, pptr, url, config, maxRetries = 3) {
   let page;
   let attempts = 0;
   while (attempts < maxRetries) {
     try {
       page = await pptr.page();
-      await page.setCookie({ 
-        name: 'auth_token', 
-        value: `${config.cookies}`, 
-        domain: '.x.com', 
-        path: '/', 
-        httpOnly: true, 
-        secure: true 
+      // 设置视口大小，使得左右侧栏被隐藏，只显示推文内容
+      await page.setViewport({ width: 600, height: 1200 });
+      await page.setCookie({
+        name: "auth_token",
+        value: `${config.cookies}`,
+        domain: ".x.com",
+        path: "/",
+        httpOnly: true,
+        secure: true
       });
       await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36");
-      
-      // 设置超时时间
-      await page.setDefaultNavigationTimeout(60000);
-      await page.setDefaultTimeout(60000);
-      // 修改页面加载等待策略
+      await page.setDefaultNavigationTimeout(6e4);
+      await page.setDefaultTimeout(6e4);
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-      // 等待推文容器渲染
-      await page.waitForSelector('article', { timeout: 30000 });
-      // 额外等待确保页面完全渲染
+      await page.waitForSelector("article", { timeout: 30000 });
       await new Promise(resolve => setTimeout(resolve, 2000));
-      // 等待推文内所有图片加载完成
       await page.evaluate(async () => {
-        const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector('article');
+        const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector("article");
         if (!article) return;
-        const imgs = Array.from(article.querySelectorAll('img'));
-        await Promise.all(imgs.map(img => {
+        const imgs = Array.from(article.querySelectorAll("img"));
+        await Promise.all(imgs.map((img) => {
           if (img.complete && img.naturalWidth > 0) return Promise.resolve();
-          return new Promise(resolve => {
+          return new Promise((resolve) => {
             img.onload = img.onerror = resolve;
           });
         }));
       });
-      // 检查是否为受保护账号
       const isProtected = await page.evaluate(() => {
         return !!document.querySelector('[aria-label="受保护账号"]');
       });
       
-      // 改进截图逻辑
-      // 定位到推文容器进行截图
       const element = await page.waitForSelector('article[data-testid="tweet"]', { timeout: 15000 });
       if (!element) {
           throw new Error('未能找到推文容器');
       }
       
-      // 滚动到元素位置，确保完全可见
-      await element.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
-      
-      // 等待滚动完成和渲染
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // 截图时包含视口外的内容
-      const screenshotBuffer = await element.screenshot({ 
-          type: "webp",
-          captureBeyondViewport: true 
+      // 获取推文卡片的精确位置，用于精确裁剪
+      const clipInfo = await page.evaluate(() => {
+        const article = document.querySelector('article[data-testid="tweet"]');
+        if (!article) return null;
+
+        const rect = article.getBoundingClientRect();
+        return {
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height)
+        };
       });
 
+      if (!clipInfo) {
+        throw new Error('无法获取推文容器的尺寸信息');
+      }
+
+      // 修复可能的方向性偏移：调整推文位置
+      await page.evaluate(() => {
+        const article = document.querySelector('article[data-testid="tweet"]');
+        if (!article) return;
+        const rect = article.getBoundingClientRect();
+        const offsetTop = rect.top - article.offsetTop + article.scrollTop;
+        const offsetLeft = rect.left - article.offsetLeft + article.scrollLeft;
+        if (Math.abs(offsetTop) > 10 || Math.abs(offsetLeft) > 10) {
+          article.style.transform = 'translate(0, 0)';
+          article.style.position = 'relative';
+        }
+      });
+
+      await page.evaluate(() => {
+        const article = document.querySelector('article[data-testid="tweet"]');
+        if (article) {
+          article.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }
+      });
+      
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      let screenshotBuffer;
+      // 使用 clip 参数精确截取推文卡片，排除周围的其他内容
+      screenshotBuffer = await page.screenshot({
+          type: "webp",
+          clip: clipInfo
+      });
       if (isProtected) {
-        // 受保护账号：只获取文字和截图，不返回媒体
         const word_content = await page.evaluate(() => {
           const el = document.querySelector('div[data-testid="tweetText"]');
-          return el ? el.textContent.trim() : '';
+          return el ? el.textContent.trim() : "";
         });
-        const element = await page.waitForSelector('article[data-testid="tweet"]', { timeout: 15000 });
-        const screenshotBuffer = element ? await element.screenshot({ type: "webp" }) : null;
+
+        // 获取推文卡片的精确位置，用于精确裁剪
+        const clipInfo2 = await page.evaluate(() => {
+          const article = document.querySelector('article[data-testid="tweet"]');
+          if (!article) return null;
+
+          const rect = article.getBoundingClientRect();
+          return {
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+          };
+        });
+
+        let screenshotBuffer2 = null;
+
+        if (clipInfo2 && clipInfo2.width > 0 && clipInfo2.height > 0) {
+          // 修复可能的方向性偏移
+          await page.evaluate(() => {
+            const article = document.querySelector('article[data-testid="tweet"]');
+            if (!article) return;
+            const rect = article.getBoundingClientRect();
+            const offsetTop = rect.top - article.offsetTop + article.scrollTop;
+            const offsetLeft = rect.left - article.offsetLeft + article.scrollLeft;
+            if (Math.abs(offsetTop) > 10 || Math.abs(offsetLeft) > 10) {
+              article.style.transform = 'translate(0, 0)';
+              article.style.position = 'relative';
+            }
+          });
+
+          // 使用 clip 参数精确截取推文卡片
+          screenshotBuffer2 = await page.screenshot({ type: "webp", clip: clipInfo2 });
+        }
         return {
-          word_content: `${word_content}\n（注：此账号为受保护账号，故不提供具体媒体内容）`,
+          word_content: `${word_content}（注：此账号为受保护账号，故不提供具体媒体内容）`,
           mediaUrls: [],
-          screenshotBuffer
+          screenshotBuffer: screenshotBuffer2
         };
-      }else {
-      // 请求 vxtwitter API
-      const apiUrl = url.replace(/(twitter\.com|x\.com)/, 'api.vxtwitter.com');
-      console.log('请求 API URL:', apiUrl);
-      try {
-        const apiResponse = await ctx.http.get(apiUrl, {
-          headers: { 
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-          }
-        });
-        console.log('成功接收到 vxtwitter API 的响应:', apiResponse);
-        return {
-          word_content: apiResponse.text,
-          mediaUrls: apiResponse.media_extended ? apiResponse.media_extended.map(m => m.url) : [],
-          screenshotBuffer
-        };
-             } catch (err) {
-         logger.error('请求 vxtwitter API 失败:', err);
-         // 如果API请求失败，返回空结果
-         return {
-           word_content: '',
-           mediaUrls: [],
-           screenshotBuffer
-         };
-       }
+      } else {
+        const apiUrl = url.replace(/(twitter\.com|x\.com)/, "api.vxtwitter.com");
+        console.log("请求 API URL:", apiUrl);
+        try {
+          const apiResponse = await ctx.http.get(apiUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+          });
+          console.log("成功接收到 vxtwitter API 的响应:", apiResponse);
+          return {
+            word_content: apiResponse.text,
+            mediaUrls: apiResponse.media_extended ? apiResponse.media_extended.map((m) => m.url) : [],
+            screenshotBuffer
+          };
+        } catch (err) {
+          logger.error("请求 vxtwitter API 失败:", err);
+          return {
+            word_content: "",
+            mediaUrls: [],
+            screenshotBuffer
+          };
+        }
       }
     } catch (error) {
       attempts++;
@@ -376,15 +433,15 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries = 3) { // �
       if (attempts >= maxRetries) {
         logger.error(`获取推文内容失败，已达最大重试次数。推文链接：${url}`, error);
         return {
-          word_content: '',
+          word_content: "",
           mediaUrls: [],
           screenshotBuffer: null
         };
       }
-      // 在重试之间添加延迟
-      await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
+      await new Promise((resolve) => setTimeout(resolve, 2e3 * attempts));
     } finally {
-      if (page) await page.close().catch(() => {});
+      if (page) await page.close().catch(() => {
+      });
     }
   }
 }
