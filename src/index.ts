@@ -285,6 +285,7 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries = 3) { // �
       // 修改页面加载等待策略
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
       // 等待推文容器渲染
+      await page.waitForSelector('article', { timeout: 30000 });
       // 额外等待确保页面完全渲染
       await page.waitForTimeout(2000);
       // 等待推文内所有图片加载完成
