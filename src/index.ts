@@ -154,7 +154,14 @@ export async function apply(ctx: Context, config, session) {
           // 判断x链接并获取内容
           await session.send("正在获取帖子截图...");
           logger.info('开始请求的推文连接：', url);
-          const tpTweet = await getTimePushedTweet(ctx, ctx.puppeteer, url, config);
+          // 根据config决定是否翻译推文
+          let tweetWord;
+          if (config.whe_translate === true && config.apiKey) {
+              const translation = await translate(tpTweet.word_content, ctx, config);
+              tweetWord = translation;
+          } else {
+              tweetWord = tpTweet.word_content;
+          }
           // 判断是否为视频推文：如果tpTweet.mediaUrls中包含.mp4则为true
           const isVideo = tpTweet.mediaUrls && tpTweet.mediaUrls.some(url => url.endsWith('.mp4'));
           // 根据是否为视频推文构造不同的消息结构
