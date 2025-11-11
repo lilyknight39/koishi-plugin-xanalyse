@@ -287,7 +287,7 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries = 3) { // �
       // 等待推文容器渲染
       await page.waitForSelector('article', { timeout: 30000 });
       // 额外等待确保页面完全渲染
-      await page.waitForTimeout(2000);
+      await new Promise(resolve => setTimeout(resolve, 2000));
       // 等待推文内所有图片加载完成
       await page.evaluate(async () => {
         const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector('article');
@@ -316,7 +316,7 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries = 3) { // �
       await element.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
       
       // 等待滚动完成和渲染
-      await page.waitForTimeout(1000);
+      await new Promise(resolve => setTimeout(resolve, 1000));
       
       // 截图时包含视口外的内容
       const screenshotBuffer = await element.screenshot({ 
